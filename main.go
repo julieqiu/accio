@@ -6,6 +6,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -13,6 +15,11 @@ import (
 
 	"github.com/julieqiu/derrors"
 )
+
+var supportedScript = map[string]bool{
+	"cmd":  true,
+	"bash": true,
+}
 
 func main() {
 	flag.Usage = func() {
@@ -31,112 +38,61 @@ func main() {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
-	switch flag.Arg(0) {
-	case "bash":
-		err = accioBash(ctx, dir)
-	case "cmd":
-		err = accioCmd(ctx, dir)
-	default:
+	if script := flag.Arg(0); supportedScript[script] {
+		err := createProjectDir(ctx, dir, flag.Arg(0))
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
 		flag.Usage()
 		os.Exit(1)
-	}
-	if err != nil {
-		log.Fatal(err)
 	}
 	log.Printf("Created %s script at %q", flag.Arg(0), dir)
 }
 
-func accioBash(ctx context.Context, dir string) (err error) {
-	defer derrors.WrapStack(&err, "accioBash(ctx, %q)", dir)
-
-	if err := createProjectDir(ctx, dir); err != nil {
-		return err
-	}
-
-	f, err := os.Create(fmt.Sprintf("%s/main.go", dir))
-	if err != nil {
-		return err
-	}
-	f.WriteString(`package main
-
-import (
-	"bytes"
-    "fmt"
-    "log"
-    "os/exec"
-    "strings"
-)
-
-func main() {
-    cmd := exec.Command("tr", "a-z", "A-Z")
-    cmd.Stdin = strings.NewReader("some input")
-    var out bytes.Buffer
-    cmd.Stdout = &out
-    err := cmd.Run()
-    if err != nil {
-        log.Fatal(err)
-    }
-    fmt.Println(out.String())
-}`)
-	f.Sync()
-	tidyModule(dir)
-	return nil
-}
-
-func accioCmd(ctx context.Context, dir string) (err error) {
-	defer derrors.WrapStack(&err, "accioCmd(ctx, %q)", dir)
-
-	if err := createProjectDir(ctx, dir); err != nil {
-		return err
-	}
-
-	f, err := os.Create(fmt.Sprintf("%s/main.go", dir))
-	if err != nil {
-		return err
-	}
-	defer func() {
-		cerr := f.Close()
-		if err != nil {
-			err = cerr
-		}
-	}()
-
-	f.WriteString(fmt.Sprintf(`package main
-
-import (
-    "flag"
-    "fmt"
-)
-
-// var myFlag = flag.Bool("flagname", false, "TODO...")
-
-func main() {
-    flag.Usage = func() {
-        fmt.Fprintln(flag.CommandLine.Output(), "usage: %s [TODO(fill this in)]")
-        flag.PrintDefaults()
-    }
-
-    flag.Parse()
-
-    // if flag.NArg() != 2 {
-    // Uncomment to check number of args.
-    // }
-
-    // switch flag.Arg(0) {
-    // Uncomment to switch on the first arg.
-    // }
-}`, filepath.Base(dir)))
-	tidyModule(dir)
-	return nil
-}
-
-func createProjectDir(ctx context.Context, dir string) (err error) {
+func createProjectDir(ctx context.Context, dir string, script string) (err error) {
 	defer derrors.WrapStack(&err, "createProjectDir(ctx, %q)", dir)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		if err := os.Mkdir(dir, os.ModePerm); err != nil {
 			return err
 		}
 	}
+	files, err := ioutil.ReadDir(script)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		inDir, err := filepath.Abs(script)
+		if err != nil {
+			return err
+		}
+
+		in, err := os.Open(fmt.Sprintf("%s/%s", inDir, f.Name()))
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+
+		out, err := os.Create(fmt.Sprintf("%s/%s", dir, f.Name()))
+		if err != nil {
+			return err
+		}
+		defer func() {
+			cerr := out.Close()
+			if err == nil {
+				err = cerr
+			}
+		}()
+
+		if _, err = io.Copy(out, in); err != nil {
+			return err
+		}
+		if err := out.Sync(); err != nil {
+			return err
+		}
+	}
+
+	tidyModule(dir)
 	return err
 }
 
